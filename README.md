@@ -34,7 +34,7 @@ Download from [Tor Project](https://www.torproject.org/download/)
 ### From source
 
 ```bash
-git clone https://github.com/yourusername/scholarmine.git
+git clone https://github.com/Sripal1/scholarmine.git
 cd scholarmine
 pip install -e .
 ```
@@ -155,7 +155,7 @@ logs/
 ### Setup development environment
 
 ```bash
-git clone https://github.com/yourusername/scholarmine.git
+git clone https://github.com/Sripal1/scholarmine.git
 cd scholarmine
 pip install -e ".[dev]"
 ```

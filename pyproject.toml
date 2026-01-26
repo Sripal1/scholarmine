@@ -52,10 +52,10 @@ dev = [
 scholarmine = "scholarmine.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/scholarmine"
-Documentation = "https://github.com/yourusername/scholarmine#readme"
-Repository = "https://github.com/yourusername/scholarmine"
-Issues = "https://github.com/yourusername/scholarmine/issues"
+Homepage = "https://github.com/Sripal1/scholarmine"
+Documentation = "https://github.com/Sripal1/scholarmine#readme"
+Repository = "https://github.com/Sripal1/scholarmine"
+Issues = "https://github.com/Sripal1/scholarmine/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["scholarmine"]
