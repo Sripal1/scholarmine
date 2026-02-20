@@ -14,20 +14,32 @@ from stem.control import Controller
 
 logger = logging.getLogger(__name__)
 
+# Configuration constants
+TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9050"
+TOR_CONTROL_PORT = 9051
+TOR_IDENTITY_WAIT_SECONDS = 10
+TOR_PROFILE_TIMEOUT_SECONDS = 20
+TOR_PAPER_TIMEOUT_SECONDS = 15
+TOR_IP_CHECK_TIMEOUT_SECONDS = 15
+IP_CHECK_URL = "http://httpbin.org/ip"
+DEFAULT_PAGE_SIZE = 50
+
 
 class TorScholarSearch:
     """Google Scholar scraping using Tor for rotating IPs with Tor circuits."""
 
-    def __init__(self, output_dir: str | None = None):
+    def __init__(self, output_dir: str | None = None, max_retries: int = 3):
         """Initialize the Tor-based Scholar scraper.
 
         Args:
             output_dir: Directory to save scraped profiles. Defaults to "Researcher_Profiles".
+            max_retries: Max retries per paper page fetch before giving up. Defaults to 3.
         """
+        self.max_retries = max_retries
         self.session = requests.Session()
         self.session.proxies = {
-            "http": "socks5h://127.0.0.1:9050",
-            "https": "socks5h://127.0.0.1:9050",
+            "http": TOR_SOCKS_PROXY,
+            "https": TOR_SOCKS_PROXY,
         }
         self.session.headers.update(
             {
@@ -47,10 +59,10 @@ class TorScholarSearch:
     def get_new_identity(self) -> None:
         """Request new Tor circuit (new IP)."""
         try:
-            with Controller.from_port(port=9051) as controller:
+            with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
                 controller.authenticate()
                 controller.signal(Signal.NEWNYM)
-                time.sleep(10)
+                time.sleep(TOR_IDENTITY_WAIT_SECONDS)
             logger.info("Requested new Tor identity")
         except Exception as e:
             logger.error(f"Failed to get new Tor identity: {e}")
@@ -58,7 +70,7 @@ class TorScholarSearch:
     def get_current_ip(self) -> str:
         """Check current exit node IP."""
         try:
-            response = self.session.get("http://httpbin.org/ip", timeout=15)
+            response = self.session.get(IP_CHECK_URL, timeout=TOR_IP_CHECK_TIMEOUT_SECONDS)
             return response.json()["origin"]
         except Exception as e:
             logger.error(f"Failed to get current IP: {e}")
@@ -83,13 +95,13 @@ class TorScholarSearch:
                 )
 
                 logger.info(f"Loading {num_papers} papers from: {enhanced_url}")
-                response = self.session.get(enhanced_url, timeout=20)
+                response = self.session.get(enhanced_url, timeout=TOR_PROFILE_TIMEOUT_SECONDS)
                 response.raise_for_status()
 
                 logger.info("Successfully loaded author profile with more papers")
                 return response.text
             else:
-                response = self.session.get(profile_url, timeout=20)
+                response = self.session.get(profile_url, timeout=TOR_PROFILE_TIMEOUT_SECONDS)
                 response.raise_for_status()
                 return response.text
 
@@ -107,7 +119,7 @@ class TorScholarSearch:
             HTML content of the paper page, or None on failure.
         """
         try:
-            response = self.session.get(paper_url, timeout=15)
+            response = self.session.get(paper_url, timeout=TOR_PAPER_TIMEOUT_SECONDS)
             response.raise_for_status()
 
             logger.info("Successfully visited paper page")
@@ -136,6 +148,7 @@ class TorScholarSearch:
                 text = row.get_text()
                 if "Description" in text:
                     description = text.split("Description", 1)[-1].strip()
+                    description = " ".join(description.split())
                     break
 
         return description if description else "Description not available"
@@ -160,7 +173,7 @@ class TorScholarSearch:
                 "a", {"class": "gsc_a_at"}
             )
 
-        for i, row in enumerate(paper_rows[:50]):
+        for i, row in enumerate(paper_rows[:DEFAULT_PAGE_SIZE]):
             try:
                 title_link = row.find("a", {"class": "gsc_a_at"})
                 if not title_link:
@@ -188,9 +201,16 @@ class TorScholarSearch:
                         logger.info(
                             f"Fetching description for paper {i+1}: {title[:50]}..."
                         )
-                        paper_content = self.visit_paper_page(paper_url)
-                        if paper_content:
-                            description = self.extract_paper_description(paper_content)
+                        for attempt in range(self.max_retries):
+                            paper_content = self.visit_paper_page(paper_url)
+                            if paper_content:
+                                description = self.extract_paper_description(paper_content)
+                                break
+                            logger.warning(
+                                f"Paper page fetch failed (attempt {attempt + 1}/{self.max_retries}), "
+                                "rotating IP and retrying..."
+                            )
+                            self.get_new_identity()
 
                     papers.append(
                         {
@@ -438,7 +458,7 @@ class TorScholarSearch:
             logger.info(f"Direct profile URL: {profile_url}")
 
             profile_content = self.visit_author_profile_with_more_papers(
-                profile_url, num_papers=50
+                profile_url, num_papers=DEFAULT_PAGE_SIZE
             )
             if not profile_content:
                 return {
@@ -476,7 +496,6 @@ class TorScholarSearch:
                 "scholar_id": scholar_id,
                 "profile_url": profile_url,
                 "author_name": author_name,
-                "author_url": profile_url,
                 "author_affiliation": author_affiliation,
                 "author_citations": author_citations,
                 "research_keywords": research_keywords,
