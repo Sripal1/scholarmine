@@ -12,12 +12,23 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from datetime import datetime
 
 from .ip_tracker import IPTracker
 from .scraper import TorScholarSearch
 
 logger = logging.getLogger(__name__)
+
+TOR_CONTROL_PORT = 9051
+TOR_STARTUP_TIMEOUT_SECONDS = 30
+RETRY_WAIT_SECONDS = 1
+THREAD_STAGGER_DELAY_SECONDS = 2
+QUEUE_TIMEOUT_SECONDS = 5.0
+MAIN_LOOP_SLEEP_SECONDS = 10
+PROGRESS_UPDATE_INTERVAL_SECONDS = 30
+THREAD_JOIN_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_RETRIES = 5
 
 
 class CSVResearcherRunner:
@@ -74,6 +85,7 @@ class CSVResearcherRunner:
         max_requests_per_ip: int = 10,
         output_dir: str | None = None,
         continue_from_log: str | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ):
         """Initialize the CSV researcher runner.
 
@@ -83,10 +95,12 @@ class CSVResearcherRunner:
             max_requests_per_ip: Max requests per IP before rotation. Defaults to 10.
             output_dir: Output directory for profiles. Defaults to "Researcher_Profiles".
             continue_from_log: Path to log directory to continue from.
+            max_retries: Max retry attempts per researcher before giving up. Defaults to 5.
         """
         self.csv_file = csv_file
         self.max_threads = max_threads
         self.max_requests_per_ip = max_requests_per_ip
+        self.max_retries = max_retries
         self.output_dir = output_dir or "Researcher_Profiles"
         self.results_lock = threading.Lock()
         self.print_lock = threading.Lock()
@@ -99,6 +113,8 @@ class CSVResearcherRunner:
             self.session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.logs_dir = os.path.join("logs", f"run_{self.session_timestamp}")
             os.makedirs(self.logs_dir, exist_ok=True)
+
+        self._setup_file_logging()
 
         ip_tracker_file = os.path.join(self.logs_dir, "ip_usage_tracker.json")
         self.ip_tracker = IPTracker(ip_tracker_file)
@@ -135,8 +151,18 @@ class CSVResearcherRunner:
         if not self.start_tor_service():
             raise RuntimeError(
                 "Failed to start Tor service. Please ensure Tor is installed "
-                "and not already running on port 9051."
+                f"and not already running on port {TOR_CONTROL_PORT}."
             )
+
+    def _setup_file_logging(self) -> None:
+        """Add a timestamped file handler to the root logger for this session."""
+        log_file = os.path.join(self.logs_dir, "scholarmine.log")
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
 
     def _create_empty_progress_data(self) -> dict:
         """Create an empty progress data structure."""
@@ -166,12 +192,12 @@ class CSVResearcherRunner:
                 return True
 
             logger.info(
-                "Starting Tor service with control port 9051 "
+                f"Starting Tor service with control port {TOR_CONTROL_PORT} "
                 "and cookie authentication disabled..."
             )
 
             self.tor_process = subprocess.Popen(
-                ["tor", "--controlport", "9051", "--cookieauthentication", "0"],
+                ["tor", "--controlport", str(TOR_CONTROL_PORT), "--cookieauthentication", "0"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -180,7 +206,7 @@ class CSVResearcherRunner:
             self.tor_started_by_script = True
             logger.info(f"Tor process started with PID: {self.tor_process.pid}")
 
-            startup_timeout = 30
+            startup_timeout = TOR_STARTUP_TIMEOUT_SECONDS
             for i in range(startup_timeout):
                 if self.check_tor_running():
                     logger.info(f"Tor is ready after {i+1} seconds")
@@ -229,7 +255,7 @@ class CSVResearcherRunner:
         try:
             from stem.control import Controller
 
-            with Controller.from_port(port=9051) as controller:
+            with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
                 controller.authenticate()
                 return True
         except Exception:
@@ -239,7 +265,7 @@ class CSVResearcherRunner:
         """Cleanup method called on exit."""
         self.stop_tor_service()
 
-    def signal_handler(self, signum: int, frame) -> None:
+    def signal_handler(self, signum: int, frame: types.FrameType | None) -> None:
         """Handle interrupt signals.
 
         Args:
@@ -283,6 +309,15 @@ class CSVResearcherRunner:
             researchers_data = {}
             with open(self.csv_file, "r", encoding="utf-8") as f:
                 csv_reader = csv.DictReader(f)
+
+                required_columns = {"name", "google_scholar_url"}
+                missing = required_columns - set(csv_reader.fieldnames or [])
+                if missing:
+                    logger.error(
+                        f"CSV file is missing required columns: {missing}. "
+                        f"Found columns: {csv_reader.fieldnames}"
+                    )
+                    return {}
 
                 for row in csv_reader:
                     name = row.get("name", "").strip()
@@ -382,22 +417,22 @@ class CSVResearcherRunner:
             logger.error(f"Failed to write progress file: {e}")
 
     def print_current_progress(self) -> None:
-        """Print current progress status."""
+        """Log current progress status."""
         with self.progress_lock:
             counts = self.progress_data["counts"]
             total = self.progress_data["total_researchers"]
             queue_size = self.researcher_queue.qsize()
 
-            print(f"\n CURRENT PROGRESS:")
-            print(f"   Total researchers: {total}")
-            print(f"   Successfully scraped: {counts['success']}")
-            print(f"   In queue (pending/retrying): {queue_size}")
-            print(f"   Currently retrying: {counts['failed_retrying']}")
-            print(f"   Success rate: {(counts['success'] / total * 100):.1f}%")
-            print(f"   Last updated: {self.progress_data['last_updated']}")
+            logger.info("CURRENT PROGRESS:")
+            logger.info(f"  Total researchers: {total}")
+            logger.info(f"  Successfully scraped: {counts['success']}")
+            logger.info(f"  In queue (pending/retrying): {queue_size}")
+            logger.info(f"  Currently retrying: {counts['failed_retrying']}")
+            logger.info(f"  Success rate: {(counts['success'] / total * 100):.1f}%")
+            logger.info(f"  Last updated: {self.progress_data['last_updated']}")
 
             if queue_size == 0 and counts["failed_retrying"] == 0:
-                print("   All researchers completed successfully!")
+                logger.info("  All researchers completed successfully!")
 
     def _run_single_researcher_scrape_by_scholar_id(
         self,
@@ -432,7 +467,7 @@ class CSVResearcherRunner:
                             f"{researcher_name} (forcing new IP)"
                         )
 
-                searcher = TorScholarSearch(self.output_dir)
+                searcher = TorScholarSearch(self.output_dir, max_retries=self.max_retries)
 
                 with self.print_lock:
                     logger.info(
@@ -440,7 +475,7 @@ class CSVResearcherRunner:
                     )
 
                 if thread_id:
-                    stagger_delay = (thread_id - 1) * 2
+                    stagger_delay = (thread_id - 1) * THREAD_STAGGER_DELAY_SECONDS
                     if stagger_delay > 0:
                         with self.print_lock:
                             logger.info(
@@ -467,6 +502,8 @@ class CSVResearcherRunner:
                                 "over-limit usage"
                             )
                         ip_retry_attempt += 1
+                        backoff = min(2 ** ip_retry_attempt, 60)
+                        time.sleep(backoff)
                         continue
 
                 scrape_result = searcher.scrape_researcher_by_scholar_id(
@@ -540,12 +577,12 @@ class CSVResearcherRunner:
         while True:
             try:
                 try:
-                    researcher_name, scholar_id = self.researcher_queue.get(timeout=5.0)
+                    researcher_name, scholar_id = self.researcher_queue.get(timeout=QUEUE_TIMEOUT_SECONDS)
                 except queue.Empty:
                     with self.queue_lock:
                         if self.researcher_queue.empty():
                             with self.print_lock:
-                                print(
+                                logger.info(
                                     f"[Thread-{thread_id}] No more researchers "
                                     "in queue, thread exiting"
                                 )
@@ -562,31 +599,40 @@ class CSVResearcherRunner:
                 while researcher_name not in successful_researchers:
                     attempt_num += 1
 
+                    if attempt_num > self.max_retries:
+                        with self.print_lock:
+                            logger.warning(
+                                f"[Thread-{thread_id}] EXHAUSTED: {researcher_name} "
+                                f"failed after {self.max_retries} attempts, giving up"
+                            )
+                        self.update_researcher_status(researcher_name, "failed_exhausted")
+                        break
+
                     with self.print_lock:
-                        print(
-                            f"\n[Thread-{thread_id}] Starting: {researcher_name} "
+                        logger.info(
+                            f"[Thread-{thread_id}] Starting: {researcher_name} "
                             f"(Scholar ID: {scholar_id}) (Attempt #{attempt_num})"
                         )
                         if attempt_num > 1:
-                            print(
+                            logger.info(
                                 f"[Thread-{thread_id}] Retrying after failure - "
-                                "requesting fresh IP and waiting 20s"
+                                f"requesting fresh IP and waiting {RETRY_WAIT_SECONDS}s"
                             )
 
                     if attempt_num > 1:
                         try:
-                            searcher = TorScholarSearch(self.output_dir)
+                            searcher = TorScholarSearch(self.output_dir, max_retries=self.max_retries)
                             searcher.get_new_identity()
 
                             with self.print_lock:
                                 new_ip = searcher.get_current_ip()
-                                print(f"[Thread-{thread_id}] Got new Tor IP: {new_ip}")
-                                print(
-                                    f"[Thread-{thread_id}] Waiting 20 seconds "
+                                logger.info(f"[Thread-{thread_id}] Got new Tor IP: {new_ip}")
+                                logger.info(
+                                    f"[Thread-{thread_id}] Waiting {RETRY_WAIT_SECONDS} seconds "
                                     "before retry..."
                                 )
 
-                            time.sleep(20)
+                            time.sleep(RETRY_WAIT_SECONDS)
 
                         except Exception as e:
                             with self.print_lock:
@@ -594,7 +640,7 @@ class CSVResearcherRunner:
                                     f"[Thread-{thread_id}] Failed to get new IP "
                                     f"for retry: {e}"
                                 )
-                            time.sleep(20)
+                            time.sleep(RETRY_WAIT_SECONDS)
 
                     start_time = time.time()
                     result = self._run_single_researcher_scrape_by_scholar_id(
@@ -625,7 +671,7 @@ class CSVResearcherRunner:
                             )
 
                         with self.print_lock:
-                            print(
+                            logger.info(
                                 f"[Thread-{thread_id}] SUCCESS: {researcher_name} "
                                 f"({result['duration']}s) (Attempt #{attempt_num})"
                             )
@@ -643,22 +689,22 @@ class CSVResearcherRunner:
                                             "Saved to:",
                                         ]
                                     ):
-                                        print(f"   {line}")
+                                        logger.info(f"   {line}")
                         break
 
                     else:
                         with self.print_lock:
-                            print(
+                            logger.warning(
                                 f"[Thread-{thread_id}] FAILED: {researcher_name} "
                                 f"({result['duration']}s) (Attempt #{attempt_num})"
                             )
                             error_info = result.get("error", "Unknown error")
                             if result.get("stderr"):
                                 error_info = result["stderr"]
-                            print(f"   Error: {error_info}")
-                            print(
+                            logger.warning(f"   Error: {error_info}")
+                            logger.info(
                                 f"[Thread-{thread_id}] Will retry with fresh IP "
-                                "after 20s wait..."
+                                f"after {RETRY_WAIT_SECONDS}s wait..."
                             )
 
                         self.update_researcher_status(researcher_name, "failed_retrying")
@@ -687,16 +733,15 @@ class CSVResearcherRunner:
             results: Shared results dictionary.
             successful_researchers: Set of successfully processed researchers.
         """
-        print(
-            f"\nQUEUE-BASED PROCESSING: Starting {len(researchers_data)} researchers "
+        logger.info(
+            f"QUEUE-BASED PROCESSING: Starting {len(researchers_data)} researchers "
             f"with Scholar IDs using {self.max_threads} continuous threads"
         )
-        print("Each thread will get a fresh Tor IP for every researcher scrape attempt")
-        print(
-            "Failed researchers will be immediately retried with fresh IP "
-            "and 20s wait until successful"
+        logger.info("Each thread will get a fresh Tor IP for every researcher scrape attempt")
+        logger.info(
+            f"Failed researchers retried up to {self.max_retries} times with fresh IP "
+            f"and {RETRY_WAIT_SECONDS}s wait between attempts"
         )
-        print("=" * 60)
 
         with self.queue_lock:
             for researcher_name, scholar_id in researchers_data.items():
@@ -711,34 +756,34 @@ class CSVResearcherRunner:
             )
             thread.start()
             threads.append(thread)
-            print(f"Started worker thread {thread_id}")
+            logger.info(f"Started worker thread {thread_id}")
 
         last_progress_time = time.time()
         while True:
-            time.sleep(10)
+            time.sleep(MAIN_LOOP_SLEEP_SECONDS)
 
             current_time = time.time()
-            if current_time - last_progress_time >= 30:
+            if current_time - last_progress_time >= PROGRESS_UPDATE_INTERVAL_SECONDS:
                 self.print_current_progress()
                 last_progress_time = current_time
 
             with self.results_lock:
                 if len(successful_researchers) == len(researchers_data):
-                    print(
-                        f"\nAll {len(researchers_data)} researchers have been "
+                    logger.info(
+                        f"All {len(researchers_data)} researchers have been "
                         "successfully processed!"
                     )
                     break
 
             alive_threads = [t for t in threads if t.is_alive()]
             if not alive_threads:
-                print("\nAll worker threads have finished")
+                logger.info("All worker threads have finished")
                 break
 
-        print("\nWaiting for worker threads to finish...")
+        logger.info("Waiting for worker threads to finish...")
         for thread in threads:
             if thread.is_alive():
-                thread.join(timeout=30)
+                thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
 
         try:
             while not self.researcher_queue.empty():
@@ -748,7 +793,7 @@ class CSVResearcherRunner:
             pass
 
         with self.print_lock:
-            print("\nQueue processing completed!")
+            logger.info("Queue processing completed!")
             self.ip_tracker.save_to_file()
 
     def process_researchers_from_csv(self) -> dict:
@@ -759,7 +804,7 @@ class CSVResearcherRunner:
         """
         researchers_data = self.read_csv_file()
         if not researchers_data:
-            print("No valid researchers with Scholar IDs found in CSV file!")
+            logger.error("No valid researchers with Scholar IDs found in CSV file!")
             return {}
 
         if self.continue_mode:
@@ -773,31 +818,28 @@ class CSVResearcherRunner:
                 if name not in successful_researchers_from_log
             }
 
-            print(f"\n{'='*80}")
-            print("CSV RESEARCHER SCRAPING SESSION (CONTINUE MODE)")
-            print(f"Continuing from: {self.logs_dir}")
-            print(f"Original researchers in CSV: {original_count}")
-            print(f"Already successful: {len(successful_researchers_from_log)}")
-            print(f"Remaining to process: {len(researchers_data)}")
+            logger.info("CSV RESEARCHER SCRAPING SESSION (CONTINUE MODE)")
+            logger.info(f"Continuing from: {self.logs_dir}")
+            logger.info(f"Original researchers in CSV: {original_count}")
+            logger.info(f"Already successful: {len(successful_researchers_from_log)}")
+            logger.info(f"Remaining to process: {len(researchers_data)}")
 
             if not researchers_data:
-                print("All researchers have already been successfully processed!")
+                logger.info("All researchers have already been successfully processed!")
                 return self.progress_data
         else:
-            print(f"\n{'='*80}")
-            print("CSV RESEARCHER SCRAPING SESSION (QUEUE-BASED CONTINUOUS RETRY)")
+            logger.info("CSV RESEARCHER SCRAPING SESSION (QUEUE-BASED CONTINUOUS RETRY)")
 
-        print(f"Starting at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"CSV file: {self.csv_file}")
-        print(f"Processing {len(researchers_data)} researchers with Scholar IDs")
-        print(f"Max threads: {self.max_threads}")
-        print(
-            "Failed researchers will be immediately retried with fresh IP "
-            "and 20s wait until successful"
+        logger.info(f"Starting at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"CSV file: {self.csv_file}")
+        logger.info(f"Processing {len(researchers_data)} researchers with Scholar IDs")
+        logger.info(f"Max threads: {self.max_threads}")
+        logger.info(
+            f"Failed researchers retried up to {self.max_retries} times with fresh IP "
+            f"and {RETRY_WAIT_SECONDS}s wait between attempts"
         )
-        print(f"IP request limit: {self.max_requests_per_ip} per IP address")
-        print(f"Session logs directory: {self.logs_dir}")
-        print("=" * 80)
+        logger.info(f"IP request limit: {self.max_requests_per_ip} per IP address")
+        logger.info(f"Session logs directory: {self.logs_dir}")
 
         if not self.continue_mode:
             researcher_names = list(researchers_data.keys())
@@ -813,9 +855,7 @@ class CSVResearcherRunner:
             researchers_data, results, successful_researchers
         )
 
-        print(f"\n{'='*80}")
-        print("CSV SESSION COMPLETED - FINAL PROGRESS")
-        print("=" * 80)
+        logger.info("CSV SESSION COMPLETED - FINAL PROGRESS")
         self.print_current_progress()
 
         self._print_final_summary(results, successful_researchers)
@@ -828,7 +868,7 @@ class CSVResearcherRunner:
         results: dict,
         successful_researchers: set,
     ) -> None:
-        """Print final session summary.
+        """Log final session summary.
 
         Args:
             results: Dictionary of results by researcher name.
@@ -836,29 +876,27 @@ class CSVResearcherRunner:
         """
         total_researchers = len(results)
         successful_count = len(successful_researchers)
-        success_rate = 100.0
+        success_rate = (successful_count / total_researchers * 100) if total_researchers else 0.0
+        exhausted_count = total_researchers - successful_count
         total_attempts = sum(len(attempts) for attempts in results.values())
 
-        print(f"\n{'='*80}")
-        print("FINAL SESSION SUMMARY")
-        print("=" * 80)
-        print(f"Total researchers: {total_researchers}")
-        print(f"Successful extractions: {successful_count}")
-        print(f"Success rate: {success_rate:.1f}% (All researchers completed successfully)")
-        print(f"Total attempts made: {total_attempts}")
-        print(
-            "Immediate retry approach: Failed researchers immediately retried "
-            "with fresh IP and 20s wait until successful"
-        )
+        logger.info("FINAL SESSION SUMMARY")
+        logger.info(f"Total researchers: {total_researchers}")
+        logger.info(f"Successful extractions: {successful_count}")
+        if exhausted_count > 0:
+            logger.info(f"Failed (exhausted retries): {exhausted_count}")
+        logger.info(f"Success rate: {success_rate:.1f}%")
+        logger.info(f"Total attempts made: {total_attempts}")
+        logger.info(f"Max retries per researcher: {self.max_retries}")
 
         if successful_count > 0:
             output_folder = getattr(self, "output_dir", "Researcher_Profiles")
-            print(f"\nData saved to '{output_folder}' folder")
-            print("Each researcher has their own subfolder containing:")
-            print("  - profile.json (researcher metadata + Tor IP)")
-            print("  - papers.csv (top 50 paper details with descriptions)")
+            logger.info(f"Data saved to '{output_folder}' folder")
+            logger.info("Each researcher has their own subfolder containing:")
+            logger.info("  - profile.json (researcher metadata + Tor IP)")
+            logger.info("  - papers.csv (top 50 paper details with descriptions)")
 
-        print("\nATTEMPT STATISTICS:")
+        logger.info("ATTEMPT STATISTICS:")
         researchers_by_attempts: dict = {}
         for name, attempts in results.items():
             attempt_count = len(attempts)
@@ -868,7 +906,7 @@ class CSVResearcherRunner:
 
         for attempt_count in sorted(researchers_by_attempts.keys()):
             researchers_list = researchers_by_attempts[attempt_count]
-            print(f"  {attempt_count} attempt(s): {len(researchers_list)} researchers")
+            logger.info(f"  {attempt_count} attempt(s): {len(researchers_list)} researchers")
 
         retry_successes = []
         for name in successful_researchers:
@@ -876,14 +914,14 @@ class CSVResearcherRunner:
                 retry_successes.append((name, len(results[name])))
 
         if retry_successes:
-            print("\nRESEARCHERS THAT SUCCEEDED AFTER MULTIPLE ATTEMPTS:")
+            logger.info("RESEARCHERS THAT SUCCEEDED AFTER MULTIPLE ATTEMPTS:")
             retry_successes.sort(key=lambda x: x[1], reverse=True)
             for name, attempt_count in retry_successes:
-                print(f"  - {name} (succeeded on attempt #{attempt_count})")
+                logger.info(f"  - {name} (succeeded on attempt #{attempt_count})")
 
         first_try_successes = len(researchers_by_attempts.get(1, []))
         if first_try_successes > 0:
-            print(f"\n{first_try_successes} researchers succeeded on first attempt")
-            print(
+            logger.info(f"{first_try_successes} researchers succeeded on first attempt")
+            logger.info(
                 f"{total_researchers - first_try_successes} researchers required retries"
             )

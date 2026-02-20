@@ -48,6 +48,12 @@ Examples:
         help="Output directory for researcher profiles (default: Researcher_Profiles)",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=5,
+        help="Maximum retry attempts per researcher before giving up (default: 5)",
+    )
+    parser.add_argument(
         "--continue",
         action="store_true",
         dest="continue_scraping",
@@ -92,6 +98,7 @@ Examples:
             max_requests_per_ip=args.max_requests_per_ip,
             output_dir=args.output_dir,
             continue_from_log=continue_from_log,
+            max_retries=args.max_retries,
         )
 
         runner.process_researchers_from_csv()
