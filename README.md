@@ -16,6 +16,8 @@ A Python package for scraping Google Scholar profiles and publications using Tor
 
 ### Install Tor
 
+ScholarMine requires Tor to be **installed** on your system. It will be started and stopped automatically when you run the `scholarmine` command — no need to run Tor manually in a separate terminal.
+
 **macOS (Homebrew):**
 ```bash
 brew install tor
@@ -26,8 +28,7 @@ brew install tor
 sudo apt install tor
 ```
 
-**Windows:**
-Download from [Tor Project](https://www.torproject.org/download/)
+> **Note:** If Tor is already running (e.g. from a previous session or system service), ScholarMine will detect and reuse it automatically.
 
 ## Installation
 
@@ -163,7 +164,12 @@ pip install -e ".[dev]"
 ### Run tests
 
 ```bash
-pytest
+# Unit tests (no Tor needed)
+python -m pytest tests/ --ignore=tests/test_integration.py
+
+# Integration tests (Tor is auto-started if not already running)
+python -m pytest -m integration --sample-size 3   # quick spot check
+python -m pytest -m integration                    # all 176 GT researchers
 ```
 
 ### Code formatting
