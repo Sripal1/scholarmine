@@ -208,10 +208,12 @@ class CSVResearcherRunner:
             self.tor_process = subprocess.Popen(
                 [
                     "tor",
+                    "-f", "/dev/null",
+                    "--defaults-torrc", "/dev/null",
                     "--ControlPort", str(TOR_CONTROL_PORT),
                     "--CookieAuthentication", "0",
                     "--DataDirectory", self._tor_data_dir,
-                    "--ignore-missing-torrc",
+                    "--SocksPort", "9050",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -224,8 +226,11 @@ class CSVResearcherRunner:
             startup_timeout = TOR_STARTUP_TIMEOUT_SECONDS
             for i in range(startup_timeout):
                 if self.tor_process.poll() is not None:
+                    stdout = self.tor_process.stdout.read() if self.tor_process.stdout else ""
                     stderr = self.tor_process.stderr.read() if self.tor_process.stderr else ""
                     logger.error(f"Tor process exited early with code {self.tor_process.returncode}")
+                    if stdout:
+                        logger.error(f"Tor stdout: {stdout.strip()}")
                     if stderr:
                         logger.error(f"Tor stderr: {stderr.strip()}")
                     return False
