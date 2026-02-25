@@ -205,11 +205,13 @@ class CSVResearcherRunner:
             )
 
             self._tor_data_dir = tempfile.mkdtemp(prefix="scholarmine-tor-")
+            empty_torrc = os.path.join(self._tor_data_dir, "empty_torrc")
+            open(empty_torrc, "w").close()
             self.tor_process = subprocess.Popen(
                 [
                     "tor",
-                    "-f", "/dev/null",
-                    "--defaults-torrc", "/dev/null",
+                    "-f", empty_torrc,
+                    "--defaults-torrc", empty_torrc,
                     "--ControlPort", str(TOR_CONTROL_PORT),
                     "--CookieAuthentication", "0",
                     "--DataDirectory", self._tor_data_dir,
