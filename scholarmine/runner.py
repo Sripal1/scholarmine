@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -203,8 +204,15 @@ class CSVResearcherRunner:
                 "and cookie authentication disabled..."
             )
 
+            self._tor_data_dir = tempfile.mkdtemp(prefix="scholarmine-tor-")
             self.tor_process = subprocess.Popen(
-                ["tor", "--controlport", str(TOR_CONTROL_PORT), "--cookieauthentication", "0"],
+                [
+                    "tor",
+                    "--ControlPort", str(TOR_CONTROL_PORT),
+                    "--CookieAuthentication", "0",
+                    "--DataDirectory", self._tor_data_dir,
+                    "--ignore-missing-torrc",
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -215,12 +223,26 @@ class CSVResearcherRunner:
 
             startup_timeout = TOR_STARTUP_TIMEOUT_SECONDS
             for i in range(startup_timeout):
+                if self.tor_process.poll() is not None:
+                    stderr = self.tor_process.stderr.read() if self.tor_process.stderr else ""
+                    logger.error(f"Tor process exited early with code {self.tor_process.returncode}")
+                    if stderr:
+                        logger.error(f"Tor stderr: {stderr.strip()}")
+                    return False
                 if self.check_tor_running():
                     logger.info(f"Tor is ready after {i+1} seconds")
                     return True
                 time.sleep(1)
 
+            stderr = ""
+            if self.tor_process.stderr:
+                try:
+                    stderr = self.tor_process.stderr.read()
+                except Exception:
+                    pass
             logger.error(f"Tor failed to start within {startup_timeout} seconds")
+            if stderr:
+                logger.error(f"Tor stderr: {stderr.strip()}")
             self.stop_tor_service()
             return False
 
