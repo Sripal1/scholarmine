@@ -23,6 +23,7 @@ TOR_PAPER_TIMEOUT_SECONDS = 15
 TOR_IP_CHECK_TIMEOUT_SECONDS = 15
 IP_CHECK_URL = "http://httpbin.org/ip"
 DEFAULT_PAGE_SIZE = 50
+CONSECUTIVE_PAPER_FAILURES_THRESHOLD = 2
 
 
 class TorScholarSearch:
@@ -173,6 +174,8 @@ class TorScholarSearch:
                 "a", {"class": "gsc_a_at"}
             )
 
+        total_papers = min(len(paper_rows), DEFAULT_PAGE_SIZE)
+        consecutive_failures = 0
         for i, row in enumerate(paper_rows[:DEFAULT_PAGE_SIZE]):
             try:
                 title_link = row.find("a", {"class": "gsc_a_at"})
@@ -197,6 +200,7 @@ class TorScholarSearch:
                         year = year_cell.get_text().strip()
 
                     description = "Description not available"
+                    fetched = False
                     if paper_url and paper_url != "No URL available":
                         logger.info(
                             f"Fetching description for paper {i+1}: {title[:50]}..."
@@ -205,12 +209,24 @@ class TorScholarSearch:
                             paper_content = self.visit_paper_page(paper_url)
                             if paper_content:
                                 description = self.extract_paper_description(paper_content)
+                                fetched = True
                                 break
                             logger.warning(
                                 f"Paper page fetch failed (attempt {attempt + 1}/{self.max_retries}), "
                                 "rotating IP and retrying..."
                             )
                             self.get_new_identity()
+
+                    if fetched:
+                        consecutive_failures = 0
+                    elif paper_url and paper_url != "No URL available":
+                        consecutive_failures += 1
+                        if consecutive_failures >= CONSECUTIVE_PAPER_FAILURES_THRESHOLD:
+                            logger.warning(
+                                f"{consecutive_failures} consecutive paper fetches failed "
+                                f"(paper {i+1}/{total_papers}) — likely rate-limited, aborting"
+                            )
+                            return None
 
                     papers.append(
                         {

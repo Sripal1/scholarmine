@@ -85,6 +85,7 @@ class CSVResearcherRunner:
         max_requests_per_ip: int = 10,
         output_dir: str | None = None,
         continue_from_log: str | None = None,
+        log_dir: str | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ):
         """Initialize the CSV researcher runner.
@@ -95,6 +96,7 @@ class CSVResearcherRunner:
             max_requests_per_ip: Max requests per IP before rotation. Defaults to 10.
             output_dir: Output directory for profiles. Defaults to "Researcher_Profiles".
             continue_from_log: Path to log directory to continue from.
+            log_dir: Pin logs to this directory instead of auto-generating a timestamped one.
             max_retries: Max retry attempts per researcher before giving up. Defaults to 5.
         """
         self.csv_file = csv_file
@@ -109,6 +111,9 @@ class CSVResearcherRunner:
         if continue_from_log:
             self.logs_dir = continue_from_log
             logger.info(f"Continue mode: Using existing log directory: {self.logs_dir}")
+        elif log_dir:
+            self.logs_dir = log_dir
+            os.makedirs(self.logs_dir, exist_ok=True)
         else:
             self.session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.logs_dir = os.path.join("logs", f"run_{self.session_timestamp}")
@@ -147,6 +152,8 @@ class CSVResearcherRunner:
 
         self.researcher_queue: queue.Queue = queue.Queue()
         self.queue_lock = threading.Lock()
+        self._active_workers = 0
+        self._active_workers_lock = threading.Lock()
 
         if not self.start_tor_service():
             raise RuntimeError(
@@ -590,6 +597,9 @@ class CSVResearcherRunner:
                         else:
                             continue
 
+                with self._active_workers_lock:
+                    self._active_workers += 1
+
                 with self.results_lock:
                     if researcher_name not in results:
                         results[researcher_name] = []
@@ -709,11 +719,15 @@ class CSVResearcherRunner:
 
                         self.update_researcher_status(researcher_name, "failed_retrying")
 
+                with self._active_workers_lock:
+                    self._active_workers -= 1
                 self.researcher_queue.task_done()
 
             except Exception as e:
                 with self.print_lock:
                     logger.error(f"[Thread-{thread_id}] Unexpected error: {e}")
+                with self._active_workers_lock:
+                    self._active_workers -= 1
                 try:
                     self.researcher_queue.task_done()
                 except Exception:
@@ -752,7 +766,6 @@ class CSVResearcherRunner:
             thread = threading.Thread(
                 target=self._queue_worker_thread,
                 args=(thread_id, results, successful_researchers),
-                daemon=True,
             )
             thread.start()
             threads.append(thread)
@@ -775,8 +788,10 @@ class CSVResearcherRunner:
                     )
                     break
 
+            with self._active_workers_lock:
+                active = self._active_workers
             alive_threads = [t for t in threads if t.is_alive()]
-            if not alive_threads:
+            if not alive_threads and active == 0:
                 logger.info("All worker threads have finished")
                 break
 
@@ -784,6 +799,11 @@ class CSVResearcherRunner:
         for thread in threads:
             if thread.is_alive():
                 thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+                if thread.is_alive():
+                    logger.warning(
+                        f"Worker thread did not finish within "
+                        f"{THREAD_JOIN_TIMEOUT_SECONDS}s timeout"
+                    )
 
         try:
             while not self.researcher_queue.empty():
@@ -860,6 +880,8 @@ class CSVResearcherRunner:
 
         self._print_final_summary(results, successful_researchers)
         self.ip_tracker.print_usage_summary()
+
+        self.stop_tor_service()
 
         return results
 

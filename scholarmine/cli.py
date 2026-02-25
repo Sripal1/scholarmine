@@ -59,6 +59,17 @@ Examples:
         dest="continue_scraping",
         help="Continue scraping from the latest log file, processing only unsuccessful or pending researchers",
     )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help=(
+            "Log directory for this session (advanced). "
+            "Pin logs to a specific folder instead of auto-generating one — "
+            "useful when running multiple parallel jobs. "
+            "With --continue, resumes from this exact directory."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -73,9 +84,13 @@ Examples:
     runner = None
     try:
         continue_from_log = None
+        log_dir = args.log_dir
 
         if args.continue_scraping:
-            continue_from_log = CSVResearcherRunner.find_latest_log_directory()
+            if log_dir:
+                continue_from_log = log_dir
+            else:
+                continue_from_log = CSVResearcherRunner.find_latest_log_directory()
             if not continue_from_log:
                 print("Error: No previous log directories found for --continue mode!")
                 print(
@@ -98,6 +113,7 @@ Examples:
             max_requests_per_ip=args.max_requests_per_ip,
             output_dir=args.output_dir,
             continue_from_log=continue_from_log,
+            log_dir=log_dir if not args.continue_scraping else None,
             max_retries=args.max_retries,
         )
 
