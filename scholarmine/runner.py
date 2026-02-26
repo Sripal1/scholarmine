@@ -1,6 +1,7 @@
 """CSV-based batch processing runner for Scholar scraping."""
 
 import atexit
+import concurrent.futures
 import csv
 import json
 import logging
@@ -31,6 +32,7 @@ MAIN_LOOP_SLEEP_SECONDS = 10
 PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 THREAD_JOIN_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_RETRIES = 5
+SCRAPE_ATTEMPT_TIMEOUT_SECONDS = 240
 
 
 class CSVResearcherRunner:
@@ -660,6 +662,15 @@ class CSVResearcherRunner:
                             )
 
                     if attempt_num > 1:
+                        if not self.check_tor_running():
+                            with self.print_lock:
+                                logger.error(
+                                    f"[Thread-{thread_id}] Tor is no longer running, "
+                                    "giving up on remaining researchers"
+                                )
+                            self.update_researcher_status(researcher_name, "failed_exhausted")
+                            break
+
                         try:
                             searcher = TorScholarSearch(self.output_dir, max_retries=self.max_retries)
                             searcher.get_new_identity()
@@ -683,9 +694,27 @@ class CSVResearcherRunner:
                             time.sleep(RETRY_WAIT_SECONDS)
 
                     start_time = time.time()
-                    result = self._run_single_researcher_scrape_by_scholar_id(
-                        researcher_name, scholar_id, thread_id=thread_id
-                    )
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            self._run_single_researcher_scrape_by_scholar_id,
+                            researcher_name, scholar_id, thread_id=thread_id,
+                        )
+                        try:
+                            result = future.result(timeout=SCRAPE_ATTEMPT_TIMEOUT_SECONDS)
+                        except concurrent.futures.TimeoutError:
+                            with self.print_lock:
+                                logger.warning(
+                                    f"[Thread-{thread_id}] TIMEOUT: {researcher_name} "
+                                    f"exceeded {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s hard limit"
+                                )
+                            result = {
+                                "success": False,
+                                "error": f"Hard timeout after {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s",
+                                "stderr": f"Hard timeout after {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s",
+                                "researcher": researcher_name,
+                                "thread_id": thread_id,
+                                "scholar_id": scholar_id,
+                            }
                     end_time = time.time()
 
                     result["duration"] = round(end_time - start_time, 2)
