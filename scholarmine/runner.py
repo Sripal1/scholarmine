@@ -21,7 +21,8 @@ from .scraper import TorScholarSearch
 
 logger = logging.getLogger(__name__)
 
-TOR_CONTROL_PORT = 9051
+TOR_SOCKS_PORT = 9150
+TOR_CONTROL_PORT = 9151
 TOR_STARTUP_TIMEOUT_SECONDS = 30
 RETRY_WAIT_SECONDS = 1
 THREAD_STAGGER_DELAY_SECONDS = 2
@@ -215,7 +216,7 @@ class CSVResearcherRunner:
                     "--ControlPort", str(TOR_CONTROL_PORT),
                     "--CookieAuthentication", "0",
                     "--DataDirectory", self._tor_data_dir,
-                    "--SocksPort", "9050",
+                    "--SocksPort", str(TOR_SOCKS_PORT),
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

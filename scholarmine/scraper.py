@@ -15,8 +15,9 @@ from stem.control import Controller
 logger = logging.getLogger(__name__)
 
 # Configuration constants
-TOR_SOCKS_PROXY = "socks5h://127.0.0.1:9050"
-TOR_CONTROL_PORT = 9051
+TOR_SOCKS_PORT = 9150
+TOR_SOCKS_PROXY = f"socks5h://127.0.0.1:{TOR_SOCKS_PORT}"
+TOR_CONTROL_PORT = 9151
 TOR_IDENTITY_WAIT_SECONDS = 10
 TOR_PROFILE_TIMEOUT_SECONDS = 20
 TOR_PAPER_TIMEOUT_SECONDS = 15
