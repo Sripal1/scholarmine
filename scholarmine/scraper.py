@@ -1,5 +1,6 @@
 """Google Scholar scraper using Tor for IP rotation."""
 
+import concurrent.futures
 import csv
 import json
 import logging
@@ -22,6 +23,7 @@ TOR_IDENTITY_WAIT_SECONDS = 10
 TOR_PROFILE_TIMEOUT_SECONDS = 20
 TOR_PAPER_TIMEOUT_SECONDS = 15
 TOR_IP_CHECK_TIMEOUT_SECONDS = 15
+TOR_CONTROL_TIMEOUT_SECONDS = 30
 IP_CHECK_URL = "http://httpbin.org/ip"
 DEFAULT_PAGE_SIZE = 50
 CONSECUTIVE_PAPER_FAILURES_THRESHOLD = 2
@@ -55,17 +57,28 @@ class TorScholarSearch:
 
         self.output_dir = output_dir
 
-        self.get_new_identity()
-        logger.info(f"Initial Tor IP: {self.get_current_ip()}")
-
     def get_new_identity(self) -> None:
-        """Request new Tor circuit (new IP)."""
-        try:
+        """Request new Tor circuit (new IP).
+
+        Uses a thread with timeout to prevent hanging if Tor control port
+        becomes unresponsive.
+        """
+
+        def _request_identity():
             with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
                 controller.authenticate()
                 controller.signal(Signal.NEWNYM)
                 time.sleep(TOR_IDENTITY_WAIT_SECONDS)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_request_identity)
+                future.result(timeout=TOR_CONTROL_TIMEOUT_SECONDS)
             logger.info("Requested new Tor identity")
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                f"Tor identity request timed out after {TOR_CONTROL_TIMEOUT_SECONDS}s"
+            )
         except Exception as e:
             logger.error(f"Failed to get new Tor identity: {e}")
 

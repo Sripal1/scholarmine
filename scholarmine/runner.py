@@ -33,6 +33,7 @@ PROGRESS_UPDATE_INTERVAL_SECONDS = 30
 THREAD_JOIN_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_RETRIES = 5
 SCRAPE_ATTEMPT_TIMEOUT_SECONDS = 240
+MAX_IP_RETRIES = 10
 
 
 class CSVResearcherRunner:
@@ -288,15 +289,22 @@ class CSVResearcherRunner:
     def check_tor_running(self) -> bool:
         """Check if Tor is running and accessible on the control port.
 
+        Uses a thread with timeout to prevent hanging if Tor is unresponsive.
+
         Returns:
             True if Tor is accessible, False otherwise.
         """
         try:
             from stem.control import Controller
 
-            with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
-                controller.authenticate()
-                return True
+            def _check():
+                with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
+                    controller.authenticate()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_check)
+                future.result(timeout=15)
+            return True
         except Exception:
             return False
 
@@ -492,7 +500,7 @@ class CSVResearcherRunner:
         thread_info = f"[Thread-{thread_id}]" if thread_id else ""
 
         ip_retry_attempt = 0
-        while True:
+        while ip_retry_attempt <= MAX_IP_RETRIES:
             try:
                 with self.print_lock:
                     if ip_retry_attempt == 0:
@@ -600,6 +608,21 @@ class CSVResearcherRunner:
                     "scholar_id": scholar_id,
                 }
 
+        with self.print_lock:
+            logger.warning(
+                f"{thread_info} Exhausted all {MAX_IP_RETRIES} IP retries for "
+                f"{researcher_name}"
+            )
+        return {
+            "success": False,
+            "error": f"Exhausted {MAX_IP_RETRIES} IP retries",
+            "stderr": f"Exhausted {MAX_IP_RETRIES} IP retries",
+            "researcher": researcher_name,
+            "thread_id": thread_id,
+            "ip_retry_attempt": ip_retry_attempt,
+            "scholar_id": scholar_id,
+        }
+
     def _queue_worker_thread(
         self,
         thread_id: int,
@@ -671,27 +694,12 @@ class CSVResearcherRunner:
                             self.update_researcher_status(researcher_name, "failed_exhausted")
                             break
 
-                        try:
-                            searcher = TorScholarSearch(self.output_dir, max_retries=self.max_retries)
-                            searcher.get_new_identity()
-
-                            with self.print_lock:
-                                new_ip = searcher.get_current_ip()
-                                logger.info(f"[Thread-{thread_id}] Got new Tor IP: {new_ip}")
-                                logger.info(
-                                    f"[Thread-{thread_id}] Waiting {RETRY_WAIT_SECONDS} seconds "
-                                    "before retry..."
-                                )
-
-                            time.sleep(RETRY_WAIT_SECONDS)
-
-                        except Exception as e:
-                            with self.print_lock:
-                                logger.warning(
-                                    f"[Thread-{thread_id}] Failed to get new IP "
-                                    f"for retry: {e}"
-                                )
-                            time.sleep(RETRY_WAIT_SECONDS)
+                        with self.print_lock:
+                            logger.info(
+                                f"[Thread-{thread_id}] Waiting {RETRY_WAIT_SECONDS} seconds "
+                                "before retry..."
+                            )
+                        time.sleep(RETRY_WAIT_SECONDS)
 
                     start_time = time.time()
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
