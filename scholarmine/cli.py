@@ -70,6 +70,12 @@ Examples:
             "With --continue, resumes from this exact directory."
         ),
     )
+    parser.add_argument(
+        "--direct",
+        action="store_true",
+        default=False,
+        help="Connect directly without Tor proxy (uses your real IP address)",
+    )
 
     args = parser.parse_args()
 
@@ -115,6 +121,7 @@ Examples:
             continue_from_log=continue_from_log,
             log_dir=log_dir if not args.continue_scraping else None,
             max_retries=args.max_retries,
+            direct=args.direct,
         )
 
         runner.process_researchers_from_csv()
