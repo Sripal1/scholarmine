@@ -32,22 +32,19 @@ CONSECUTIVE_PAPER_FAILURES_THRESHOLD = 2
 class TorScholarSearch:
     """Google Scholar scraping using Tor for rotating IPs with Tor circuits."""
 
-    def __init__(self, output_dir: str | None = None, max_retries: int = 3, direct: bool = False):
+    def __init__(self, output_dir: str | None = None, max_retries: int = 3):
         """Initialize the Tor-based Scholar scraper.
 
         Args:
             output_dir: Directory to save scraped profiles. Defaults to "Researcher_Profiles".
             max_retries: Max retries per paper page fetch before giving up. Defaults to 3.
-            direct: If True, skip Tor proxy and connect directly. Defaults to False.
         """
         self.max_retries = max_retries
-        self.direct = direct
         self.session = requests.Session()
-        if not self.direct:
-            self.session.proxies = {
-                "http": TOR_SOCKS_PROXY,
-                "https": TOR_SOCKS_PROXY,
-            }
+        self.session.proxies = {
+            "http": TOR_SOCKS_PROXY,
+            "https": TOR_SOCKS_PROXY,
+        }
         self.session.headers.update(
             {
                 "User-Agent": (
@@ -64,10 +61,8 @@ class TorScholarSearch:
         """Request new Tor circuit (new IP).
 
         Uses a thread with timeout to prevent hanging if Tor control port
-        becomes unresponsive. No-op when running in direct mode.
+        becomes unresponsive.
         """
-        if self.direct:
-            return
 
         def _request_identity():
             with Controller.from_port(port=TOR_CONTROL_PORT) as controller:

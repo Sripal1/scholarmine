@@ -92,7 +92,6 @@ class CSVResearcherRunner:
         continue_from_log: str | None = None,
         log_dir: str | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        direct: bool = False,
     ):
         """Initialize the CSV researcher runner.
 
@@ -104,13 +103,11 @@ class CSVResearcherRunner:
             continue_from_log: Path to log directory to continue from.
             log_dir: Pin logs to this directory instead of auto-generating a timestamped one.
             max_retries: Max retry attempts per researcher before giving up. Defaults to 5.
-            direct: If True, skip Tor and connect directly. Defaults to False.
         """
         self.csv_file = csv_file
         self.max_threads = max_threads
         self.max_requests_per_ip = max_requests_per_ip
         self.max_retries = max_retries
-        self.direct = direct
         self.output_dir = output_dir or "Researcher_Profiles"
         self.results_lock = threading.Lock()
         self.print_lock = threading.Lock()
@@ -163,9 +160,7 @@ class CSVResearcherRunner:
         self._active_workers = 0
         self._active_workers_lock = threading.Lock()
 
-        if self.direct:
-            logger.info("Direct mode: skipping Tor startup")
-        elif not self.start_tor_service():
+        if not self.start_tor_service():
             raise RuntimeError(
                 "Failed to start Tor service. Please ensure Tor is installed "
                 f"and not already running on port {TOR_CONTROL_PORT}."
@@ -519,45 +514,44 @@ class CSVResearcherRunner:
                             f"{researcher_name} (forcing new IP)"
                         )
 
-                searcher = TorScholarSearch(self.output_dir, max_retries=self.max_retries, direct=self.direct)
+                searcher = TorScholarSearch(self.output_dir, max_retries=self.max_retries)
 
-                if not self.direct:
-                    with self.print_lock:
-                        logger.info(
-                            f"{thread_info} Requesting new Tor identity for fresh IP..."
-                        )
+                with self.print_lock:
+                    logger.info(
+                        f"{thread_info} Requesting new Tor identity for fresh IP..."
+                    )
 
-                    if thread_id:
-                        stagger_delay = (thread_id - 1) * THREAD_STAGGER_DELAY_SECONDS
-                        if stagger_delay > 0:
-                            with self.print_lock:
-                                logger.info(
-                                    f"{thread_info} Waiting {stagger_delay}s for "
-                                    "staggered identity request..."
-                                )
-                            time.sleep(stagger_delay)
+                if thread_id:
+                    stagger_delay = (thread_id - 1) * THREAD_STAGGER_DELAY_SECONDS
+                    if stagger_delay > 0:
+                        with self.print_lock:
+                            logger.info(
+                                f"{thread_info} Waiting {stagger_delay}s for "
+                                "staggered identity request..."
+                            )
+                        time.sleep(stagger_delay)
 
-                    searcher.get_new_identity()
+                searcher.get_new_identity()
 
-                    current_ip = searcher.get_current_ip()
+                current_ip = searcher.get_current_ip()
 
-                    if current_ip and current_ip != "Errored IP":
-                        current_usage = self.ip_tracker.get_ip_usage_count(current_ip)
+                if current_ip and current_ip != "Errored IP":
+                    current_usage = self.ip_tracker.get_ip_usage_count(current_ip)
 
-                        if current_usage >= self.max_requests_per_ip:
-                            with self.print_lock:
-                                logger.warning(
-                                    f"{thread_info} IP {current_ip} has reached/exceeded "
-                                    f"limit ({current_usage}/{self.max_requests_per_ip})"
-                                )
-                                logger.info(
-                                    f"{thread_info} Retrying with new IP to avoid "
-                                    "over-limit usage"
-                                )
-                            ip_retry_attempt += 1
-                            backoff = min(2 ** ip_retry_attempt, 60)
-                            time.sleep(backoff)
-                            continue
+                    if current_usage >= self.max_requests_per_ip:
+                        with self.print_lock:
+                            logger.warning(
+                                f"{thread_info} IP {current_ip} has reached/exceeded "
+                                f"limit ({current_usage}/{self.max_requests_per_ip})"
+                            )
+                            logger.info(
+                                f"{thread_info} Retrying with new IP to avoid "
+                                "over-limit usage"
+                            )
+                        ip_retry_attempt += 1
+                        backoff = min(2 ** ip_retry_attempt, 60)
+                        time.sleep(backoff)
+                        continue
 
                 scrape_result = searcher.scrape_researcher_by_scholar_id(
                     scholar_id, researcher_name
@@ -691,7 +685,7 @@ class CSVResearcherRunner:
                             )
 
                     if attempt_num > 1:
-                        if not self.direct and not self.check_tor_running():
+                        if not self.check_tor_running():
                             with self.print_lock:
                                 logger.error(
                                     f"[Thread-{thread_id}] Tor is no longer running, "
