@@ -34,6 +34,7 @@ THREAD_JOIN_TIMEOUT_SECONDS = 30
 DEFAULT_MAX_RETRIES = 5
 SCRAPE_ATTEMPT_TIMEOUT_SECONDS = 240
 MAX_IP_RETRIES = 10
+STALE_PROGRESS_TIMEOUT_SECONDS = 600
 
 
 class CSVResearcherRunner:
@@ -301,10 +302,15 @@ class CSVResearcherRunner:
                 with Controller.from_port(port=TOR_CONTROL_PORT) as controller:
                     controller.authenticate()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_check)
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_check)
+            try:
                 future.result(timeout=15)
-            return True
+                return True
+            except Exception:
+                return False
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             return False
 
@@ -841,6 +847,8 @@ class CSVResearcherRunner:
             logger.info(f"Started worker thread {thread_id}")
 
         last_progress_time = time.time()
+        last_activity_time = time.time()
+        last_known_successes = 0
         while True:
             time.sleep(MAIN_LOOP_SLEEP_SECONDS)
 
@@ -850,18 +858,30 @@ class CSVResearcherRunner:
                 last_progress_time = current_time
 
             with self.results_lock:
-                if len(successful_researchers) == len(researchers_data):
+                current_successes = len(successful_researchers)
+                if current_successes == len(researchers_data):
                     logger.info(
                         f"All {len(researchers_data)} researchers have been "
                         "successfully processed!"
                     )
                     break
 
+            if current_successes != last_known_successes:
+                last_known_successes = current_successes
+                last_activity_time = current_time
+
             with self._active_workers_lock:
                 active = self._active_workers
             alive_threads = [t for t in threads if t.is_alive()]
             if not alive_threads and active == 0:
                 logger.info("All worker threads have finished")
+                break
+
+            if current_time - last_activity_time >= STALE_PROGRESS_TIMEOUT_SECONDS:
+                logger.warning(
+                    f"No new successes in {STALE_PROGRESS_TIMEOUT_SECONDS}s, "
+                    "threads appear stuck — forcing exit"
+                )
                 break
 
         logger.info("Waiting for worker threads to finish...")

@@ -70,10 +70,10 @@ class TorScholarSearch:
                 controller.signal(Signal.NEWNYM)
                 time.sleep(TOR_IDENTITY_WAIT_SECONDS)
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(_request_identity)
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_request_identity)
-                future.result(timeout=TOR_CONTROL_TIMEOUT_SECONDS)
+            future.result(timeout=TOR_CONTROL_TIMEOUT_SECONDS)
             logger.info("Requested new Tor identity")
         except concurrent.futures.TimeoutError:
             logger.error(
@@ -81,6 +81,8 @@ class TorScholarSearch:
             )
         except Exception as e:
             logger.error(f"Failed to get new Tor identity: {e}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def get_current_ip(self) -> str:
         """Check current exit node IP."""
