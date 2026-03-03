@@ -10,6 +10,7 @@ from .runner import CSVResearcherRunner
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+logging.getLogger("stem").setLevel(logging.WARNING)
 
 
 def main() -> None:

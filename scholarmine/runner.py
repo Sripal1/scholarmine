@@ -702,27 +702,29 @@ class CSVResearcherRunner:
                         time.sleep(RETRY_WAIT_SECONDS)
 
                     start_time = time.time()
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(
-                            self._run_single_researcher_scrape_by_scholar_id,
-                            researcher_name, scholar_id, thread_id=thread_id,
-                        )
-                        try:
-                            result = future.result(timeout=SCRAPE_ATTEMPT_TIMEOUT_SECONDS)
-                        except concurrent.futures.TimeoutError:
-                            with self.print_lock:
-                                logger.warning(
-                                    f"[Thread-{thread_id}] TIMEOUT: {researcher_name} "
-                                    f"exceeded {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s hard limit"
-                                )
-                            result = {
-                                "success": False,
-                                "error": f"Hard timeout after {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s",
-                                "stderr": f"Hard timeout after {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s",
-                                "researcher": researcher_name,
-                                "thread_id": thread_id,
-                                "scholar_id": scholar_id,
-                            }
+                    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    future = executor.submit(
+                        self._run_single_researcher_scrape_by_scholar_id,
+                        researcher_name, scholar_id, thread_id=thread_id,
+                    )
+                    try:
+                        result = future.result(timeout=SCRAPE_ATTEMPT_TIMEOUT_SECONDS)
+                    except concurrent.futures.TimeoutError:
+                        with self.print_lock:
+                            logger.warning(
+                                f"[Thread-{thread_id}] TIMEOUT: {researcher_name} "
+                                f"exceeded {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s hard limit"
+                            )
+                        result = {
+                            "success": False,
+                            "error": f"Hard timeout after {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s",
+                            "stderr": f"Hard timeout after {SCRAPE_ATTEMPT_TIMEOUT_SECONDS}s",
+                            "researcher": researcher_name,
+                            "thread_id": thread_id,
+                            "scholar_id": scholar_id,
+                        }
+                    finally:
+                        executor.shutdown(wait=False, cancel_futures=True)
                     end_time = time.time()
 
                     result["duration"] = round(end_time - start_time, 2)
